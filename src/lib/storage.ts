@@ -6,7 +6,7 @@ export type DropboxTokenInfo = {
 
 const APP_KEY_STORAGE_KEY = "easy-pass:dropbox-app-key";
 const TOKEN_STORAGE_KEY = "easy-pass:dropbox-token-info";
-const DEFAULT_DROPBOX_APP_KEY = import.meta.env.VITE_DROPBOX_APP_KEY ?? "56efgyouoypazep";
+const DEFAULT_DROPBOX_APP_KEY = import.meta.env.VITE_DROPBOX_APP_KEY?.trim() || "56efgyouoypazep";
 
 export function loadDropboxAppKey(): string {
   return localStorage.getItem(APP_KEY_STORAGE_KEY) ?? DEFAULT_DROPBOX_APP_KEY;
