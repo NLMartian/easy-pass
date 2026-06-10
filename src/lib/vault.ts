@@ -17,6 +17,7 @@ const decoder = new TextDecoder();
 const VAULT_AAD = encoder.encode("easy-pass:vault:v1");
 
 export const VAULT_FILE_NAME = "vault.enc";
+export const MIN_MASTER_PASSWORD_LENGTH = 10;
 
 export const DEFAULT_KDF: Omit<KdfParams, "salt"> = {
   name: "Argon2id",
@@ -56,6 +57,25 @@ export async function createVaultSession(masterPassword: string): Promise<VaultS
       key: await deriveAesKey(masterPassword, kdf),
       kdf,
       createdAt,
+    },
+  };
+}
+
+export async function changeVaultMasterPassword(
+  session: VaultSession,
+  masterPassword: string,
+): Promise<VaultSession> {
+  const kdf: KdfParams = {
+    ...DEFAULT_KDF,
+    salt: bytesToBase64(randomBytes(16)),
+  };
+
+  return {
+    ...session,
+    keyContext: {
+      key: await deriveAesKey(masterPassword, kdf),
+      kdf,
+      createdAt: session.keyContext.createdAt,
     },
   };
 }

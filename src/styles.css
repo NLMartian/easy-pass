@@ -771,6 +771,20 @@ a {
   margin-top: 18px;
 }
 
+.settings-section {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.settings-section .primary-button {
+  justify-self: start;
+}
+
 .modal-footer {
   justify-content: flex-end;
   margin-top: 24px;

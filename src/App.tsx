@@ -51,7 +51,9 @@ import {
   saveDropboxTokenInfo,
 } from "./lib/storage";
 import {
+  changeVaultMasterPassword,
   createVaultSession,
+  MIN_MASTER_PASSWORD_LENGTH,
   sealVault,
   unlockVault,
   unlockVaultWithKeyContext,
@@ -113,6 +115,8 @@ export function App() {
   const [unlockPassword, setUnlockPassword] = useState("");
   const [newMasterPassword, setNewMasterPassword] = useState("");
   const [newMasterPasswordConfirm, setNewMasterPasswordConfirm] = useState("");
+  const [changedMasterPassword, setChangedMasterPassword] = useState("");
+  const [changedMasterPasswordConfirm, setChangedMasterPasswordConfirm] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<EntryDraft>(EMPTY_DRAFT);
   const [showPassword, setShowPassword] = useState(false);
@@ -329,6 +333,8 @@ export function App() {
     setSelectedId(null);
     setEditingId(null);
     setUnlockPassword("");
+    setChangedMasterPassword("");
+    setChangedMasterPasswordConfirm("");
     setDirty(false);
     setNotice({ kind: "info", text: "密码库已锁定。" });
   }
@@ -360,8 +366,8 @@ export function App() {
       setNotice({ kind: "error", text: "请先连接 Dropbox。" });
       return;
     }
-    if (newMasterPassword.length < 12) {
-      setNotice({ kind: "error", text: "主密码至少 12 个字符。" });
+    if (newMasterPassword.length < MIN_MASTER_PASSWORD_LENGTH) {
+      setNotice({ kind: "error", text: `主密码至少 ${MIN_MASTER_PASSWORD_LENGTH} 个字符。` });
       return;
     }
     if (newMasterPassword !== newMasterPasswordConfirm) {
@@ -407,6 +413,33 @@ export function App() {
           ? "远端 vault.enc 已变化。请先拉取远端或确认后再处理。"
           : formatDropboxError(error),
       });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleChangeMasterPassword(event: FormEvent) {
+    event.preventDefault();
+    if (!session) return;
+    if (changedMasterPassword.length < MIN_MASTER_PASSWORD_LENGTH) {
+      setNotice({ kind: "error", text: `新主密码至少 ${MIN_MASTER_PASSWORD_LENGTH} 个字符。` });
+      return;
+    }
+    if (changedMasterPassword !== changedMasterPasswordConfirm) {
+      setNotice({ kind: "error", text: "两次输入的新主密码不一致。" });
+      return;
+    }
+
+    setBusy("修改主密码");
+    try {
+      const nextSession = await changeVaultMasterPassword(session, changedMasterPassword);
+      setSession(nextSession);
+      setDirty(true);
+      setChangedMasterPassword("");
+      setChangedMasterPasswordConfirm("");
+      setNotice({ kind: "success", text: "主密码已修改。请同步到 Dropbox 使新主密码生效。" });
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : "主密码修改失败。" });
     } finally {
       setBusy(null);
     }
@@ -770,17 +803,20 @@ export function App() {
                 value={newMasterPassword}
                 onChange={(event) => setNewMasterPassword(event.target.value)}
                 autoComplete="new-password"
+                minLength={MIN_MASTER_PASSWORD_LENGTH}
               />
             </label>
             <label className="field">
-              <span>确认主密码</span>
+            <span>确认主密码</span>
               <input
                 type="password"
                 value={newMasterPasswordConfirm}
                 onChange={(event) => setNewMasterPasswordConfirm(event.target.value)}
                 autoComplete="new-password"
+                minLength={MIN_MASTER_PASSWORD_LENGTH}
               />
             </label>
+            <p className="muted">主密码至少 {MIN_MASTER_PASSWORD_LENGTH} 个字符。</p>
             <button className="primary-button wide" type="submit" disabled={Boolean(busy)}>
               <Check size={17} />
               创建 vault.enc
@@ -1267,6 +1303,38 @@ export function App() {
             <input value={appKeyDraft} onChange={(event) => setAppKeyDraft(event.target.value)} autoComplete="off" />
           </label>
           <p className="muted">Redirect URI: {getDropboxRedirectUri()}</p>
+          {session && (
+            <form className="settings-section" onSubmit={handleChangeMasterPassword}>
+              <div className="section-header">
+                <span>修改主密码</span>
+              </div>
+              <label className="field">
+                <span>新主密码</span>
+                <input
+                  type="password"
+                  value={changedMasterPassword}
+                  onChange={(event) => setChangedMasterPassword(event.target.value)}
+                  autoComplete="new-password"
+                  minLength={MIN_MASTER_PASSWORD_LENGTH}
+                />
+              </label>
+              <label className="field">
+                <span>确认新主密码</span>
+                <input
+                  type="password"
+                  value={changedMasterPasswordConfirm}
+                  onChange={(event) => setChangedMasterPasswordConfirm(event.target.value)}
+                  autoComplete="new-password"
+                  minLength={MIN_MASTER_PASSWORD_LENGTH}
+                />
+              </label>
+              <p className="muted">修改后需要同步，其他设备才会使用新主密码。</p>
+              <button className="primary-button" type="submit" disabled={Boolean(busy)}>
+                <KeyRound size={17} />
+                修改主密码
+              </button>
+            </form>
+          )}
           <div className="settings-actions">
             <button className="ghost-button" onClick={handleExportEncrypted}>
               <Download size={16} />
