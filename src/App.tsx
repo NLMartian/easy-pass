@@ -6,6 +6,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  History,
   KeyRound,
   Lock,
   LogOut,
@@ -37,6 +38,8 @@ import { randomId } from "./lib/encoding";
 import {
   DEFAULT_PASSWORD_OPTIONS,
   generatePassword,
+  MAX_GENERATED_PASSWORD_LENGTH,
+  MIN_GENERATED_PASSWORD_LENGTH,
   PasswordGeneratorOptions,
 } from "./lib/passwords";
 import {
@@ -54,7 +57,8 @@ import {
   unlockVaultWithKeyContext,
   VAULT_FILE_NAME,
 } from "./lib/vault";
-import type { VaultItem, VaultSession } from "./types";
+import { generateTotp, parseTotpInput, type TotpCode } from "./lib/totp";
+import type { TotpConfig, VaultCustomField, VaultItem, VaultSession } from "./types";
 
 type Notice = {
   kind: "info" | "success" | "error";
@@ -68,6 +72,13 @@ type EntryDraft = {
   url: string;
   notes: string;
   tags: string;
+  customFields: VaultCustomField[];
+  totpSecret: string;
+  totpIssuer: string;
+  totpAccount: string;
+  totpAlgorithm: "" | TotpConfig["algorithm"];
+  totpDigits: string;
+  totpPeriod: string;
 };
 
 const EMPTY_DRAFT: EntryDraft = {
@@ -77,6 +88,13 @@ const EMPTY_DRAFT: EntryDraft = {
   url: "",
   notes: "",
   tags: "",
+  customFields: [],
+  totpSecret: "",
+  totpIssuer: "",
+  totpAccount: "",
+  totpAlgorithm: "",
+  totpDigits: "",
+  totpPeriod: "",
 };
 
 export function App() {
@@ -99,6 +117,12 @@ export function App() {
   const [draft, setDraft] = useState<EntryDraft>(EMPTY_DRAFT);
   const [showPassword, setShowPassword] = useState(false);
   const [showDraftPassword, setShowDraftPassword] = useState(false);
+  const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
+  const [visibleDraftFields, setVisibleDraftFields] = useState<Record<string, boolean>>({});
+  const [showPasswordHistory, setShowPasswordHistory] = useState(false);
+  const [historyVisibility, setHistoryVisibility] = useState<Record<string, boolean>>({});
+  const [clockTick, setClockTick] = useState(Date.now());
+  const [totpCode, setTotpCode] = useState<TotpCode | null>(null);
   const [passwordOptions, setPasswordOptions] = useState<PasswordGeneratorOptions>(DEFAULT_PASSWORD_OPTIONS);
   const autoLoadAttempted = useRef(false);
 
@@ -112,7 +136,15 @@ export function App() {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) return items;
     return items.filter((item) => {
-      const haystack = [item.title, item.username, item.url, item.notes, item.tags.join(" ")]
+      const haystack = [
+        item.title,
+        item.username,
+        item.url,
+        item.notes,
+        item.tags.join(" "),
+        item.customFields.map((field) => `${field.label} ${field.value}`).join(" "),
+        item.totp ? `${item.totp.issuer} ${item.totp.account}` : "",
+      ]
         .join(" ")
         .toLowerCase();
       return haystack.includes(normalizedQuery);
@@ -201,7 +233,47 @@ export function App() {
 
   useEffect(() => {
     setShowPassword(false);
+    setVisibleSecrets({});
+    setVisibleDraftFields({});
+    setShowPasswordHistory(false);
+    setHistoryVisibility({});
   }, [selectedId]);
+
+  useEffect(() => {
+    if (!session) return;
+    const intervalId = window.setInterval(() => setClockTick(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [session]);
+
+  useEffect(() => {
+    const totp = selectedItem?.totp;
+    if (!totp) {
+      setTotpCode(null);
+      return;
+    }
+
+    let cancelled = false;
+    generateTotp(totp, clockTick)
+      .then((code) => {
+        if (!cancelled) setTotpCode(code);
+      })
+      .catch(() => {
+        if (!cancelled) setTotpCode(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    clockTick,
+    selectedItem?.id,
+    selectedItem?.totp?.account,
+    selectedItem?.totp?.algorithm,
+    selectedItem?.totp?.digits,
+    selectedItem?.totp?.issuer,
+    selectedItem?.totp?.period,
+    selectedItem?.totp?.secret,
+  ]);
 
   async function handleConnectDropbox() {
     const nextAppKey = appKeyDraft.trim();
@@ -223,7 +295,8 @@ export function App() {
   function handleSaveSettings() {
     const nextAppKey = appKeyDraft.trim();
     saveDropboxAppKey(nextAppKey);
-    if (nextAppKey !== appKey) {
+    const effectiveAppKey = loadDropboxAppKey();
+    if (effectiveAppKey !== appKey) {
       saveDropboxTokenInfo(null);
       setTokens(null);
       setRemoteVault(null);
@@ -232,7 +305,7 @@ export function App() {
       setDirty(false);
       autoLoadAttempted.current = false;
     }
-    setAppKey(nextAppKey);
+    setAppKey(effectiveAppKey);
     setSettingsOpen(false);
     setNotice({ kind: "success", text: "设置已保存。" });
   }
@@ -380,20 +453,24 @@ export function App() {
     setDraft({
       ...EMPTY_DRAFT,
       password: generatePassword(passwordOptions),
+      customFields: [],
     });
     setShowDraftPassword(true);
+    setVisibleDraftFields({});
   }
 
   function handleEditItem(item: VaultItem) {
     setEditingId(item.id);
     setDraft(itemToDraft(item));
     setShowDraftPassword(false);
+    setVisibleDraftFields({});
   }
 
   function handleCancelEdit() {
     setEditingId(null);
     setDraft(EMPTY_DRAFT);
     setShowDraftPassword(false);
+    setVisibleDraftFields({});
   }
 
   function handleSaveItem(event: FormEvent) {
@@ -411,6 +488,25 @@ export function App() {
     }
 
     const now = new Date().toISOString();
+    const existingItem = editingId ? session.data.items.find((item) => item.id === editingId) ?? null : null;
+    let totp: TotpConfig | null;
+    try {
+      totp = parseTotpDraft(draft);
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : "一次性密码配置无效。" });
+      return;
+    }
+    const passwordHistory =
+      existingItem && existingItem.password !== draft.password
+        ? [
+            {
+              id: randomId("history"),
+              password: existingItem.password,
+              changedAt: now,
+            },
+            ...existingItem.passwordHistory,
+          ].slice(0, 50)
+        : existingItem?.passwordHistory ?? [];
     const nextItem: VaultItem = {
       id: editingId ?? randomId("entry"),
       title: normalizedTitle,
@@ -419,9 +515,10 @@ export function App() {
       url: draft.url.trim(),
       notes: draft.notes,
       tags: parseTags(draft.tags),
-      createdAt: editingId
-        ? session.data.items.find((item) => item.id === editingId)?.createdAt ?? now
-        : now,
+      customFields: normalizeDraftCustomFields(draft.customFields),
+      passwordHistory,
+      totp,
+      createdAt: existingItem?.createdAt ?? now,
       updatedAt: now,
     };
 
@@ -468,6 +565,66 @@ export function App() {
     });
     setDirty(true);
     setNotice({ kind: "info", text: "条目已删除。" });
+  }
+
+  function handleAddCustomField(kind: VaultCustomField["kind"]) {
+    setDraft((previous) => ({
+      ...previous,
+      customFields: [
+        ...previous.customFields,
+        {
+          id: randomId("field"),
+          label: "",
+          value: "",
+          kind,
+        },
+      ],
+    }));
+  }
+
+  function handleUpdateCustomField(id: string, patch: Partial<VaultCustomField>) {
+    setDraft((previous) => ({
+      ...previous,
+      customFields: previous.customFields.map((field) => (field.id === id ? { ...field, ...patch } : field)),
+    }));
+  }
+
+  function handleGenerateCustomField(id: string) {
+    handleUpdateCustomField(id, { value: generatePassword(passwordOptions) });
+    setVisibleDraftFields((previous) => ({ ...previous, [id]: true }));
+  }
+
+  function handleRemoveCustomField(id: string) {
+    setDraft((previous) => ({
+      ...previous,
+      customFields: previous.customFields.filter((field) => field.id !== id),
+    }));
+    setVisibleDraftFields((previous) => {
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
+  }
+
+  function toggleSecretVisibility(id: string) {
+    setVisibleSecrets((previous) => ({
+      ...previous,
+      [id]: !previous[id],
+    }));
+  }
+
+  function toggleHistoryVisibility(id: string) {
+    setHistoryVisibility((previous) => ({
+      ...previous,
+      [id]: !previous[id],
+    }));
+  }
+
+  function toggleDraftFieldVisibility(id: string) {
+    setVisibleDraftFields((previous) => ({
+      ...previous,
+      [id]: !previous[id],
+    }));
   }
 
   async function copyToClipboard(value: string, label: string) {
@@ -758,6 +915,37 @@ export function App() {
             </button>
           </div>
 
+          {item.totp && (
+            <>
+              <div className="detail-label">一次性密码</div>
+              <div className="totp-card">
+                <div>
+                  <div className="totp-code">{totpCode ? formatTotpCode(totpCode.code) : "------"}</div>
+                  <div className="muted">
+                    {[item.totp.issuer, item.totp.account].filter(Boolean).join(" · ") || "TOTP"}
+                  </div>
+                </div>
+                <div className="totp-actions">
+                  <span>{totpCode?.secondsRemaining ?? item.totp.period}s</span>
+                  <button
+                    className="icon-button small"
+                    title="复制一次性密码"
+                    onClick={() => totpCode && void copyToClipboard(totpCode.code, "一次性密码")}
+                  >
+                    <Copy size={15} />
+                  </button>
+                </div>
+                <div className="totp-progress">
+                  <span
+                    style={{
+                      width: `${totpCode ? (totpCode.secondsRemaining / totpCode.period) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
           <div className="detail-label">网址</div>
           <div className="detail-value">
             {item.url ? (
@@ -769,6 +957,16 @@ export function App() {
             )}
           </div>
 
+          {item.customFields.map((field) => (
+            <CustomFieldDetail
+              key={field.id}
+              field={field}
+              visible={field.kind === "plain" || Boolean(visibleSecrets[field.id])}
+              onToggle={() => toggleSecretVisibility(field.id)}
+              onCopy={() => void copyToClipboard(field.value, field.label || "字段")}
+            />
+          ))}
+
           <div className="detail-label">标签</div>
           <div className="tag-row">
             {item.tags.length ? item.tags.map((tag) => <span key={tag}>{tag}</span>) : <span className="muted">未填写</span>}
@@ -776,6 +974,43 @@ export function App() {
 
           <div className="detail-label">备注</div>
           <div className="notes-value">{item.notes || "未填写"}</div>
+
+          <div className="detail-label">历史密码</div>
+          <div className="history-list">
+            {item.passwordHistory.length ? (
+              <>
+                <button className="ghost-button" type="button" onClick={() => setShowPasswordHistory(!showPasswordHistory)}>
+                  <History size={16} />
+                  {showPasswordHistory ? "隐藏" : "查看"} {item.passwordHistory.length} 条
+                </button>
+                {showPasswordHistory &&
+                  item.passwordHistory.map((historyItem) => (
+                    <div className="history-row" key={historyItem.id}>
+                      <span className="history-date">{formatDate(historyItem.changedAt)}</span>
+                      <span className="history-password">
+                        {historyVisibility[historyItem.id] ? historyItem.password : "••••••••••••"}
+                      </span>
+                      <button
+                        className="icon-button small"
+                        title={historyVisibility[historyItem.id] ? "隐藏历史密码" : "显示历史密码"}
+                        onClick={() => toggleHistoryVisibility(historyItem.id)}
+                      >
+                        {historyVisibility[historyItem.id] ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                      <button
+                        className="icon-button small"
+                        title="复制历史密码"
+                        onClick={() => void copyToClipboard(historyItem.password, "历史密码")}
+                      >
+                        <Copy size={15} />
+                      </button>
+                    </div>
+                  ))}
+              </>
+            ) : (
+              <span className="muted">暂无历史</span>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -835,8 +1070,8 @@ export function App() {
               长度
               <input
                 type="range"
-                min="12"
-                max="48"
+                min={MIN_GENERATED_PASSWORD_LENGTH}
+                max={MAX_GENERATED_PASSWORD_LENGTH}
                 value={passwordOptions.length}
                 onChange={(event) => setPasswordOptions({ ...passwordOptions, length: Number(event.target.value) })}
               />
@@ -875,6 +1110,126 @@ export function App() {
             <span>标签</span>
             <input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="work, bank" />
           </label>
+          <div className="form-section full">
+            <div className="section-header">
+              <span>自定义字段</span>
+              <div className="button-row">
+                <button className="ghost-button" type="button" onClick={() => handleAddCustomField("plain")}>
+                  <Plus size={16} />
+                  普通
+                </button>
+                <button className="ghost-button" type="button" onClick={() => handleAddCustomField("secret")}>
+                  <Plus size={16} />
+                  敏感
+                </button>
+              </div>
+            </div>
+            <div className="custom-field-editor">
+              {draft.customFields.map((field) => (
+                <div className="custom-field-row" key={field.id}>
+                  <input
+                    value={field.label}
+                    onChange={(event) => handleUpdateCustomField(field.id, { label: event.target.value })}
+                    placeholder="字段名"
+                  />
+                  <div className="input-with-actions custom-field-value">
+                    <input
+                      type={field.kind === "secret" && !visibleDraftFields[field.id] ? "password" : "text"}
+                      value={field.value}
+                      onChange={(event) => handleUpdateCustomField(field.id, { value: event.target.value })}
+                      placeholder="字段值"
+                    />
+                    {field.kind === "secret" && (
+                      <button
+                        className="icon-button small"
+                        type="button"
+                        title={visibleDraftFields[field.id] ? "隐藏字段" : "显示字段"}
+                        onClick={() => toggleDraftFieldVisibility(field.id)}
+                      >
+                        {visibleDraftFields[field.id] ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                    )}
+                    <button
+                      className="icon-button small"
+                      type="button"
+                      title="生成密码"
+                      onClick={() => handleGenerateCustomField(field.id)}
+                    >
+                      <WandSparkles size={15} />
+                    </button>
+                  </div>
+                  <select
+                    value={field.kind}
+                    onChange={(event) =>
+                      handleUpdateCustomField(field.id, { kind: event.target.value as VaultCustomField["kind"] })
+                    }
+                  >
+                    <option value="plain">普通</option>
+                    <option value="secret">敏感</option>
+                  </select>
+                  <button className="icon-button" type="button" title="删除字段" onClick={() => handleRemoveCustomField(field.id)}>
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+              {draft.customFields.length === 0 && <span className="muted">暂无自定义字段</span>}
+            </div>
+          </div>
+          <div className="form-section full">
+            <div className="section-header">
+              <span>一次性密码</span>
+            </div>
+            <div className="totp-editor-grid">
+              <label className="field full">
+                <span>密钥或 otpauth URI</span>
+                <input
+                  value={draft.totpSecret}
+                  onChange={(event) => setDraft({ ...draft, totpSecret: event.target.value })}
+                  placeholder="JBSWY3DPEHPK3PXP"
+                />
+              </label>
+              <label className="field">
+                <span>发行方</span>
+                <input value={draft.totpIssuer} onChange={(event) => setDraft({ ...draft, totpIssuer: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>账号</span>
+                <input value={draft.totpAccount} onChange={(event) => setDraft({ ...draft, totpAccount: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>算法</span>
+                <select
+                  value={draft.totpAlgorithm}
+                  onChange={(event) =>
+                    setDraft({ ...draft, totpAlgorithm: event.target.value as EntryDraft["totpAlgorithm"] })
+                  }
+                >
+                  <option value="">自动</option>
+                  <option value="SHA-1">SHA-1</option>
+                  <option value="SHA-256">SHA-256</option>
+                  <option value="SHA-512">SHA-512</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>位数</span>
+                <input
+                  inputMode="numeric"
+                  value={draft.totpDigits}
+                  onChange={(event) => setDraft({ ...draft, totpDigits: event.target.value })}
+                  placeholder="6"
+                />
+              </label>
+              <label className="field">
+                <span>周期</span>
+                <input
+                  inputMode="numeric"
+                  value={draft.totpPeriod}
+                  onChange={(event) => setDraft({ ...draft, totpPeriod: event.target.value })}
+                  placeholder="30"
+                />
+              </label>
+            </div>
+          </div>
           <label className="field full">
             <span>备注</span>
             <textarea value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} rows={7} />
@@ -949,7 +1304,67 @@ function itemToDraft(item: VaultItem): EntryDraft {
     url: item.url,
     notes: item.notes,
     tags: item.tags.join(", "),
+    customFields: item.customFields.map((field) => ({ ...field })),
+    totpSecret: item.totp?.secret ?? "",
+    totpIssuer: item.totp?.issuer ?? "",
+    totpAccount: item.totp?.account ?? "",
+    totpAlgorithm: item.totp?.algorithm ?? "",
+    totpDigits: item.totp ? String(item.totp.digits) : "",
+    totpPeriod: item.totp ? String(item.totp.period) : "",
   };
+}
+
+function normalizeDraftCustomFields(fields: VaultCustomField[]): VaultCustomField[] {
+  return fields.flatMap((field) => {
+    const label = field.label.trim();
+    const value = field.value;
+    if (!label && !value) {
+      return [];
+    }
+    return [
+      {
+        id: field.id || randomId("field"),
+        label: label || "未命名字段",
+        value,
+        kind: field.kind === "secret" ? "secret" : "plain",
+      },
+    ];
+  });
+}
+
+function parseTotpDraft(draft: EntryDraft): TotpConfig | null {
+  if (!draft.totpSecret.trim()) {
+    return null;
+  }
+
+  const parsed = parseTotpInput(draft.totpSecret);
+  const digits = parseIntegerOrFallback(draft.totpDigits, parsed.digits, 6, 8, "一次性密码位数");
+  const period = parseIntegerOrFallback(draft.totpPeriod, parsed.period, 15, 120, "一次性密码周期");
+  return {
+    ...parsed,
+    issuer: draft.totpIssuer.trim() || parsed.issuer,
+    account: draft.totpAccount.trim() || parsed.account,
+    algorithm: draft.totpAlgorithm || parsed.algorithm,
+    digits,
+    period,
+  };
+}
+
+function parseIntegerOrFallback(
+  value: string,
+  fallback: number,
+  min: number,
+  max: number,
+  label: string,
+): number {
+  if (!value.trim()) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${label}必须是 ${min}-${max} 之间的整数。`);
+  }
+  return parsed;
 }
 
 function parseTags(value: string): string[] {
@@ -977,4 +1392,42 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTotpCode(code: string): string {
+  if (code.length === 6) {
+    return `${code.slice(0, 3)} ${code.slice(3)}`;
+  }
+  return code;
+}
+
+function CustomFieldDetail({
+  field,
+  visible,
+  onToggle,
+  onCopy,
+}: {
+  field: VaultCustomField;
+  visible: boolean;
+  onToggle: () => void;
+  onCopy: () => void;
+}) {
+  return (
+    <>
+      <div className="detail-label">{field.label || "未命名字段"}</div>
+      <div className="detail-value password-value">
+        <span>{visible ? field.value || "未填写" : "••••••••••••"}</span>
+        {field.kind === "secret" && (
+          <button className="icon-button small" title={visible ? "隐藏字段" : "显示字段"} onClick={onToggle}>
+            {visible ? <EyeOff size={15} /> : <Eye size={15} />}
+          </button>
+        )}
+        {field.value && (
+          <button className="icon-button small" title="复制字段" onClick={onCopy}>
+            <Copy size={15} />
+          </button>
+        )}
+      </div>
+    </>
+  );
 }

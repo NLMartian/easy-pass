@@ -1,3 +1,25 @@
+export type VaultCustomField = {
+  id: string;
+  label: string;
+  value: string;
+  kind: "plain" | "secret";
+};
+
+export type PasswordHistoryItem = {
+  id: string;
+  password: string;
+  changedAt: string;
+};
+
+export type TotpConfig = {
+  secret: string;
+  issuer: string;
+  account: string;
+  algorithm: "SHA-1" | "SHA-256" | "SHA-512";
+  digits: number;
+  period: number;
+};
+
 export type VaultItem = {
   id: string;
   title: string;
@@ -6,6 +28,9 @@ export type VaultItem = {
   url: string;
   notes: string;
   tags: string[];
+  customFields: VaultCustomField[];
+  passwordHistory: PasswordHistoryItem[];
+  totp: TotpConfig | null;
   createdAt: string;
   updatedAt: string;
 };

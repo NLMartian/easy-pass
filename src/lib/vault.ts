@@ -1,5 +1,15 @@
 import { argon2id } from "hash-wasm";
-import type { KdfParams, VaultData, VaultEnvelope, VaultKeyContext, VaultSession } from "../types";
+import type {
+  KdfParams,
+  PasswordHistoryItem,
+  TotpConfig,
+  VaultCustomField,
+  VaultData,
+  VaultEnvelope,
+  VaultItem,
+  VaultKeyContext,
+  VaultSession,
+} from "../types";
 import { base64ToBytes, bytesToBase64, randomBytes } from "./encoding";
 
 const encoder = new TextEncoder();
@@ -188,10 +198,10 @@ function parseVaultData(raw: string): VaultData {
     throw new Error("主密码错误，或 vault.enc 已损坏。");
   }
 
-  if (!isVaultData(value)) {
+  if (!isRawVaultData(value)) {
     throw new Error("解密成功，但密码库数据结构不受支持。");
   }
-  return value;
+  return normalizeVaultData(value);
 }
 
 function isEnvelope(value: unknown): value is VaultEnvelope {
@@ -226,7 +236,7 @@ function isKdf(value: unknown): value is KdfParams {
   );
 }
 
-function isVaultData(value: unknown): value is VaultData {
+function isRawVaultData(value: unknown): value is VaultData {
   if (!value || typeof value !== "object") {
     return false;
   }
@@ -253,4 +263,105 @@ function isVaultData(value: unknown): value is VaultData {
       );
     })
   );
+}
+
+function normalizeVaultData(data: VaultData): VaultData {
+  return {
+    version: 1,
+    meta: data.meta,
+    items: data.items.map(normalizeVaultItem),
+  };
+}
+
+function normalizeVaultItem(item: VaultItem): VaultItem {
+  const maybeItem = item as VaultItem & {
+    customFields?: unknown;
+    passwordHistory?: unknown;
+    totp?: unknown;
+  };
+
+  return {
+    ...item,
+    customFields: normalizeCustomFields(maybeItem.customFields),
+    passwordHistory: normalizePasswordHistory(maybeItem.passwordHistory),
+    totp: normalizeTotp(maybeItem.totp),
+  };
+}
+
+function normalizeCustomFields(value: unknown): VaultCustomField[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((field) => {
+    const maybeField = field as Partial<VaultCustomField>;
+    if (
+      typeof maybeField.id !== "string" ||
+      typeof maybeField.label !== "string" ||
+      typeof maybeField.value !== "string" ||
+      (maybeField.kind !== "plain" && maybeField.kind !== "secret")
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: maybeField.id,
+        label: maybeField.label,
+        value: maybeField.value,
+        kind: maybeField.kind,
+      },
+    ];
+  });
+}
+
+function normalizePasswordHistory(value: unknown): PasswordHistoryItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((historyItem) => {
+    const maybeHistoryItem = historyItem as Partial<PasswordHistoryItem>;
+    if (
+      typeof maybeHistoryItem.id !== "string" ||
+      typeof maybeHistoryItem.password !== "string" ||
+      typeof maybeHistoryItem.changedAt !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: maybeHistoryItem.id,
+        password: maybeHistoryItem.password,
+        changedAt: maybeHistoryItem.changedAt,
+      },
+    ];
+  });
+}
+
+function normalizeTotp(value: unknown): TotpConfig | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const maybeTotp = value as Partial<TotpConfig>;
+  const algorithm = maybeTotp.algorithm;
+  const digits = maybeTotp.digits;
+  const period = maybeTotp.period;
+  if (
+    typeof maybeTotp.secret !== "string" ||
+    typeof maybeTotp.issuer !== "string" ||
+    typeof maybeTotp.account !== "string" ||
+    (algorithm !== "SHA-1" && algorithm !== "SHA-256" && algorithm !== "SHA-512") ||
+    typeof digits !== "number" ||
+    !Number.isInteger(digits) ||
+    typeof period !== "number" ||
+    !Number.isInteger(period)
+  ) {
+    return null;
+  }
+  return {
+    secret: maybeTotp.secret,
+    issuer: maybeTotp.issuer,
+    account: maybeTotp.account,
+    algorithm,
+    digits,
+    period,
+  };
 }

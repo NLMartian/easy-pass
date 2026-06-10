@@ -4,6 +4,8 @@ const LOWERCASE = "abcdefghijkmnopqrstuvwxyz";
 const UPPERCASE = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 const DIGITS = "23456789";
 const SYMBOLS = "!@#$%^&*()-_=+[]{};:,.?";
+export const MIN_GENERATED_PASSWORD_LENGTH = 5;
+export const MAX_GENERATED_PASSWORD_LENGTH = 48;
 
 export type PasswordGeneratorOptions = {
   length: number;
@@ -25,9 +27,13 @@ export function generatePassword(options: PasswordGeneratorOptions): string {
   if (options.digits) groups.push(DIGITS);
   if (options.symbols) groups.push(SYMBOLS);
 
+  const length = Math.min(
+    MAX_GENERATED_PASSWORD_LENGTH,
+    Math.max(MIN_GENERATED_PASSWORD_LENGTH, groups.length, options.length),
+  );
   const alphabet = groups.join("");
   const characters = groups.map((group) => pickCharacter(group));
-  while (characters.length < options.length) {
+  while (characters.length < length) {
     characters.push(pickCharacter(alphabet));
   }
 
