@@ -1306,12 +1306,14 @@ export function App() {
           <div className="detail-label">密码</div>
           <div className="detail-value password-value">
             <span>{showPassword ? item.password : "••••••••••••"}</span>
-            <button className="icon-button small" title={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>
-              {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-            </button>
-            <button className="icon-button small" title="复制密码" onClick={() => void copyToClipboard(item.password, "密码")}>
-              <Copy size={15} />
-            </button>
+            <div className="password-actions">
+              <button className="icon-button small" title={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>
+                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+              <button className="icon-button small" title="复制密码" onClick={() => void copyToClipboard(item.password, "密码")}>
+                <Copy size={15} />
+              </button>
+            </div>
           </div>
 
           {item.totp && (
@@ -1873,15 +1875,19 @@ function CustomFieldDetail({
       <div className="detail-label">{field.label || "未命名字段"}</div>
       <div className="detail-value password-value">
         <span>{visible ? field.value || "未填写" : "••••••••••••"}</span>
-        {field.kind === "secret" && (
-          <button className="icon-button small" title={visible ? "隐藏字段" : "显示字段"} onClick={onToggle}>
-            {visible ? <EyeOff size={15} /> : <Eye size={15} />}
-          </button>
-        )}
-        {field.value && (
-          <button className="icon-button small" title="复制字段" onClick={onCopy}>
-            <Copy size={15} />
-          </button>
+        {(field.kind === "secret" || field.value) && (
+          <div className="password-actions">
+            {field.kind === "secret" && (
+              <button className="icon-button small" title={visible ? "隐藏字段" : "显示字段"} onClick={onToggle}>
+                {visible ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            )}
+            {field.value && (
+              <button className="icon-button small" title="复制字段" onClick={onCopy}>
+                <Copy size={15} />
+              </button>
+            )}
+          </div>
         )}
       </div>
     </>
