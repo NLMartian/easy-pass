@@ -267,6 +267,24 @@ a {
   padding: clamp(16px, 4vw, 34px);
 }
 
+.app-footer {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 0 clamp(16px, 4vw, 34px) 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.app-footer a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.app-footer a:hover {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+
 .locked-panel {
   width: min(520px, 100%);
   margin: clamp(28px, 8vh, 90px) auto;

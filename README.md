@@ -42,6 +42,8 @@ npm run dev
 
 如果没有设置 `VITE_DROPBOX_APP_KEY`，会使用内置 App key。用户仍可在页面设置里手动输入其他 App key，值只保存在当前浏览器。
 
+隐私协议页面会随 Pages 一起发布：`https://<user>.github.io/easy-pass/privacy.html`。
+
 ## 安全边界
 
 - 主密码不会写入 localStorage 或 Dropbox；解锁后派生出的 `CryptoKey` 只保留在当前页面内存中。

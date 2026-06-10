@@ -99,6 +99,8 @@ const EMPTY_DRAFT: EntryDraft = {
   totpPeriod: "",
 };
 
+const PRIVACY_HREF = `${import.meta.env.BASE_URL}privacy.html`;
+
 export function App() {
   const [appKey, setAppKey] = useState(loadDropboxAppKey);
   const [appKeyDraft, setAppKeyDraft] = useState(appKey);
@@ -733,6 +735,9 @@ export function App() {
       )}
 
       <main className="main-surface">{session ? renderUnlocked() : renderLocked()}</main>
+      <footer className="app-footer">
+        <a href={PRIVACY_HREF}>隐私协议</a>
+      </footer>
 
       {settingsOpen && renderSettings()}
       {busy && (
@@ -807,7 +812,7 @@ export function App() {
               />
             </label>
             <label className="field">
-            <span>确认主密码</span>
+              <span>确认主密码</span>
               <input
                 type="password"
                 value={newMasterPasswordConfirm}

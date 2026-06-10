@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Privacy Policy for Easy Pass, an end-to-end encrypted password manager that syncs an encrypted vault file with Dropbox."
+    />
+    <link rel="icon" type="image/png" sizes="64x64" href="./icon-64.png" />
+    <link rel="apple-touch-icon" sizes="256x256" href="./icon-256.png" />
+    <title>Privacy Policy | Easy Pass</title>
+    <style>
+      :root {
+        color: #16211d;
+        background: #f6f8f7;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background: #f6f8f7;
+      }
+
+      a {
+        color: #16735f;
+      }
+
+      .page {
+        width: min(860px, 100%);
+        margin: 0 auto;
+        padding: clamp(24px, 5vw, 56px) clamp(16px, 4vw, 28px);
+      }
+
+      .policy {
+        border: 1px solid #d8e0dc;
+        border-radius: 8px;
+        background: #ffffff;
+        box-shadow: 0 18px 40px rgba(30, 44, 38, 0.12);
+        padding: clamp(22px, 4vw, 36px);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 26px;
+      }
+
+      .brand img {
+        width: 48px;
+        height: 48px;
+        border-radius: 12px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(28px, 6vw, 42px);
+        line-height: 1.1;
+      }
+
+      h2 {
+        margin: 28px 0 10px;
+        font-size: 18px;
+      }
+
+      p,
+      li {
+        color: #42514b;
+        line-height: 1.68;
+      }
+
+      ul {
+        padding-left: 22px;
+      }
+
+      .meta {
+        margin-top: 8px;
+        color: #63726b;
+      }
+
+      .back {
+        display: inline-flex;
+        margin-top: 28px;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <article class="policy">
+        <div class="brand">
+          <img src="./icon-64.png" width="48" height="48" alt="" />
+          <div>
+            <h1>Easy Pass Privacy Policy</h1>
+            <p class="meta">Last updated: June 10, 2026</p>
+          </div>
+        </div>
+
+        <p>
+          Easy Pass is a static, end-to-end encrypted password manager. It runs in your browser and
+          uses Dropbox only to store and synchronize one encrypted vault file named
+          <strong>vault.enc</strong> in the app's Dropbox App Folder.
+        </p>
+
+        <h2>Information We Collect</h2>
+        <p>
+          We do not operate a backend server and we do not collect, receive, sell, or share your
+          personal information. Easy Pass does not send your vault contents to any server controlled
+          by us.
+        </p>
+
+        <h2>Information Stored Locally</h2>
+        <ul>
+          <li>Your Dropbox OAuth token is stored in your browser's local storage so the app can sync with Dropbox.</li>
+          <li>Your Dropbox app key setting may be stored in your browser if you override the bundled app key.</li>
+          <li>Your master password is never stored. The derived encryption key exists only in page memory while the vault is unlocked.</li>
+        </ul>
+
+        <h2>Information Stored in Dropbox</h2>
+        <p>
+          Password entries, custom fields, TOTP secrets, notes, tags, and password history are
+          encrypted locally before upload. Dropbox receives only the encrypted <strong>vault.enc</strong>
+          file and related file metadata needed to store and synchronize it.
+        </p>
+
+        <h2>Dropbox API Usage</h2>
+        <p>
+          Easy Pass requests Dropbox OAuth permission for <code>files.content.read</code>,
+          <code>files.content.write</code>, and <code>files.metadata.read</code>. These permissions
+          are used only to read, upload, and check metadata for <strong>vault.enc</strong> in the
+          app's Dropbox App Folder.
+        </p>
+
+        <h2>Security</h2>
+        <p>
+          The vault is encrypted in the browser using a key derived from your master password with
+          Argon2id and encrypted with AES-256-GCM. If you forget the master password, we cannot
+          recover your vault.
+        </p>
+
+        <h2>Data Control and Deletion</h2>
+        <ul>
+          <li>You can remove the local Dropbox token from the app settings.</li>
+          <li>You can revoke Dropbox access from your Dropbox account settings.</li>
+          <li>You can delete the encrypted vault by deleting <strong>vault.enc</strong> from the app's Dropbox App Folder.</li>
+        </ul>
+
+        <h2>Contact</h2>
+        <p>
+          For questions about this policy, open an issue at
+          <a href="https://github.com/NLMartian/easy-pass/issues">github.com/NLMartian/easy-pass</a>.
+        </p>
+
+        <a class="back" href="./">Back to Easy Pass</a>
+      </article>
+    </main>
+  </body>
+</html>
