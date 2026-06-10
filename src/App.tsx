@@ -28,6 +28,7 @@ import {
   downloadRemoteVault,
   formatDropboxError,
   getDropboxRedirectUri,
+  getRemoteVaultMetadata,
   hasOAuthRedirect,
   isDropboxConflict,
   RemoteVault,
@@ -44,10 +45,13 @@ import {
 } from "./lib/passwords";
 import {
   DropboxTokenInfo,
+  clearPendingVaultInfo,
   hasDropboxToken,
   loadDropboxAppKey,
+  loadPendingVaultInfo,
   loadDropboxTokenInfo,
   saveDropboxAppKey,
+  savePendingVaultInfo,
   saveDropboxTokenInfo,
 } from "./lib/storage";
 import {
@@ -59,13 +63,17 @@ import {
   unlockVaultWithKeyContext,
   VAULT_FILE_NAME,
 } from "./lib/vault";
+import { mergeVaults } from "./lib/vaultMerge";
 import { generateTotp, parseTotpInput, type TotpCode } from "./lib/totp";
-import type { TotpConfig, VaultCustomField, VaultItem, VaultSession } from "./types";
+import type { TotpConfig, VaultCustomField, VaultData, VaultItem, VaultSession } from "./types";
 
 type Notice = {
   kind: "info" | "success" | "error";
   text: string;
 } | null;
+
+type SyncStatus = "synced" | "pending" | "saving" | "syncing" | "remote-update" | "offline" | "error";
+type SyncMode = "manual" | "auto";
 
 type EntryDraft = {
   title: string;
@@ -100,6 +108,9 @@ const EMPTY_DRAFT: EntryDraft = {
 };
 
 const PRIVACY_HREF = `${import.meta.env.BASE_URL}privacy.html`;
+const LOCAL_SAVE_DEBOUNCE_MS = 300;
+const AUTO_SYNC_DEBOUNCE_MS = 3000;
+const REMOTE_CHECK_INTERVAL_MS = 60_000;
 
 export function App() {
   const [appKey, setAppKey] = useState(loadDropboxAppKey);
@@ -108,9 +119,11 @@ export function App() {
   const [remoteVault, setRemoteVault] = useState<RemoteVault | null>(null);
   const [remoteMissing, setRemoteMissing] = useState(false);
   const [session, setSession] = useState<VaultSession | null>(null);
+  const [baseVaultData, setBaseVaultData] = useState<VaultData | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("synced");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -131,17 +144,26 @@ export function App() {
   const [totpCode, setTotpCode] = useState<TotpCode | null>(null);
   const [passwordOptions, setPasswordOptions] = useState<PasswordGeneratorOptions>(DEFAULT_PASSWORD_OPTIONS);
   const autoLoadAttempted = useRef(false);
+  const appKeyRef = useRef(appKey);
+  const tokensRef = useRef(tokens);
+  const remoteVaultRef = useRef(remoteVault);
+  const sessionRef = useRef(session);
+  const baseVaultDataRef = useRef(baseVaultData);
+  const dirtyRef = useRef(dirty);
+  const syncInFlightRef = useRef(false);
+  const remoteCheckInFlightRef = useRef(false);
 
   const connected = hasDropboxToken(tokens);
   const items = session?.data.items ?? [];
+  const visibleItems = useMemo(() => items.filter((item) => !item.deletedAt), [items]);
   const selectedItem = useMemo(
-    () => items.find((item) => item.id === selectedId) ?? null,
-    [items, selectedId],
+    () => visibleItems.find((item) => item.id === selectedId) ?? null,
+    [selectedId, visibleItems],
   );
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return items;
-    return items.filter((item) => {
+    if (!normalizedQuery) return visibleItems;
+    return visibleItems.filter((item) => {
       const haystack = [
         item.title,
         item.username,
@@ -155,7 +177,7 @@ export function App() {
         .toLowerCase();
       return haystack.includes(normalizedQuery);
     });
-  }, [items, query]);
+  }, [query, visibleItems]);
 
   const refreshRemoteVault = useCallback(
     async (tokenOverride?: DropboxTokenInfo | null): Promise<RemoteVault | null> => {
@@ -188,6 +210,30 @@ export function App() {
     },
     [appKey, tokens],
   );
+
+  useEffect(() => {
+    appKeyRef.current = appKey;
+  }, [appKey]);
+
+  useEffect(() => {
+    tokensRef.current = tokens;
+  }, [tokens]);
+
+  useEffect(() => {
+    remoteVaultRef.current = remoteVault;
+  }, [remoteVault]);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    baseVaultDataRef.current = baseVaultData;
+  }, [baseVaultData]);
+
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
 
   useEffect(() => {
     setAppKeyDraft(appKey);
@@ -228,14 +274,14 @@ export function App() {
 
   useEffect(() => {
     if (!session) return;
-    if (!selectedId && session.data.items[0]) {
-      setSelectedId(session.data.items[0].id);
+    if (!selectedId && visibleItems[0]) {
+      setSelectedId(visibleItems[0].id);
       return;
     }
-    if (selectedId && !session.data.items.some((item) => item.id === selectedId)) {
-      setSelectedId(session.data.items[0]?.id ?? null);
+    if (selectedId && !visibleItems.some((item) => item.id === selectedId)) {
+      setSelectedId(visibleItems[0]?.id ?? null);
     }
-  }, [selectedId, session]);
+  }, [selectedId, session, visibleItems]);
 
   useEffect(() => {
     setShowPassword(false);
@@ -281,6 +327,296 @@ export function App() {
     selectedItem?.totp?.secret,
   ]);
 
+  useEffect(() => {
+    if (!session || !dirty) return;
+    setSyncStatus(isOffline() ? "offline" : "pending");
+
+    const localSaveTimer = window.setTimeout(() => {
+      void persistLocalPendingVault(session);
+    }, LOCAL_SAVE_DEBOUNCE_MS);
+    const autoSyncTimer = window.setTimeout(() => {
+      void syncVault("auto");
+    }, AUTO_SYNC_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(localSaveTimer);
+      window.clearTimeout(autoSyncTimer);
+    };
+  }, [dirty, session]);
+
+  useEffect(() => {
+    if (!session || !connected) return;
+
+    void checkRemoteForUpdates("auto");
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void checkRemoteForUpdates("auto");
+      }
+    };
+    const handleOnline = () => {
+      if (dirtyRef.current) {
+        void syncVault("auto");
+      } else {
+        void checkRemoteForUpdates("auto");
+      }
+    };
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void checkRemoteForUpdates("auto");
+      }
+    }, REMOTE_CHECK_INTERVAL_MS);
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleOnline);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleOnline);
+      window.clearInterval(intervalId);
+    };
+  }, [connected, session?.keyContext]);
+
+  function markVaultDirty() {
+    dirtyRef.current = true;
+    setDirty(true);
+    setSyncStatus(isOffline() ? "offline" : "pending");
+  }
+
+  async function persistLocalPendingVault(sessionSnapshot: VaultSession) {
+    if (!dirtyRef.current) return;
+    setSyncStatus("saving");
+    try {
+      const sealed = await sealVault(sessionSnapshot);
+      if (!dirtyRef.current || sessionRef.current !== sessionSnapshot) return;
+      savePendingVaultInfo({
+        text: sealed.text,
+        savedAt: new Date().toISOString(),
+        remoteRev: remoteVaultRef.current?.rev ?? null,
+      });
+      setSyncStatus(isOffline() ? "offline" : "pending");
+    } catch (error) {
+      setSyncStatus("error");
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : "本地加密保存失败。" });
+    }
+  }
+
+  async function syncVault(mode: SyncMode) {
+    const currentSession = sessionRef.current;
+    if (!currentSession) return;
+    if (syncInFlightRef.current) return;
+    if (isOffline()) {
+      setSyncStatus("offline");
+      if (mode === "manual") {
+        setNotice({ kind: "info", text: "当前离线，已保留本地加密待同步副本。" });
+      }
+      return;
+    }
+
+    syncInFlightRef.current = true;
+    setSyncStatus("syncing");
+    if (mode === "manual") {
+      setBusy("加密并同步");
+    }
+
+    try {
+      const context = await requireDropboxClient();
+      const sealed = await sealVault(currentSession);
+      try {
+        const uploaded = await uploadRemoteVault(context.dbx, sealed.text, remoteVaultRef.current?.rev ?? null);
+        const applied = applySyncedVault(currentSession, sealed.data, uploaded);
+        if (mode === "manual") {
+          setNotice({
+            kind: "success",
+            text: applied ? "已同步到 Dropbox。" : "已上传当前快照，新的本地修改将继续自动同步。",
+          });
+        }
+      } catch (error) {
+        if (!isDropboxConflict(error)) {
+          throw error;
+        }
+        const downloaded = await downloadRemoteVault(context.dbx);
+        if (!downloaded) {
+          const uploaded = await uploadRemoteVault(context.dbx, sealed.text, null);
+          const applied = applySyncedVault(currentSession, sealed.data, uploaded);
+          if (mode === "manual") {
+            setNotice({
+              kind: "success",
+              text: applied ? "远端文件不存在，已重新创建 vault.enc。" : "已重新创建远端文件，新的本地修改将继续自动同步。",
+            });
+          }
+          return;
+        }
+
+        const remoteSession = await unlockVaultWithKeyContext(downloaded.text, currentSession.keyContext);
+        const merged = mergeVaults(baseVaultDataRef.current, sealed.data, remoteSession.data);
+        const mergedSession: VaultSession = {
+          ...currentSession,
+          data: merged.data,
+        };
+        const mergedSealed = await sealVault(mergedSession);
+        const uploaded = await uploadRemoteVault(context.dbx, mergedSealed.text, downloaded.rev);
+        const applied = applySyncedVault(mergedSession, mergedSealed.data, uploaded);
+        setNotice({
+          kind: "success",
+          text:
+            !applied
+              ? "已上传合并结果，新的本地修改将继续自动同步。"
+              : merged.conflicts > 0
+              ? `已自动合并并同步。${merged.conflicts} 处字段冲突保留本地版本。`
+              : "已自动合并远端更新并同步。",
+        });
+      }
+    } catch (error) {
+      setSyncStatus(isOffline() ? "offline" : "error");
+      setNotice({ kind: "error", text: formatDropboxError(error) });
+    } finally {
+      syncInFlightRef.current = false;
+      if (mode === "manual") {
+        setBusy(null);
+      }
+    }
+  }
+
+  async function checkRemoteForUpdates(mode: SyncMode) {
+    const currentSession = sessionRef.current;
+    if (!currentSession || !hasDropboxToken(tokensRef.current)) return;
+    if (syncInFlightRef.current || remoteCheckInFlightRef.current) return;
+    if (isOffline()) {
+      if (dirtyRef.current) {
+        setSyncStatus("offline");
+      }
+      return;
+    }
+
+    let shouldSyncAfterCheck = false;
+    remoteCheckInFlightRef.current = true;
+    try {
+      const context = await requireDropboxClient();
+      const metadata = await getRemoteVaultMetadata(context.dbx);
+      if (!metadata) {
+        setRemoteVault(null);
+        setRemoteMissing(true);
+        if (dirtyRef.current) {
+          shouldSyncAfterCheck = true;
+          setSyncStatus("pending");
+        } else {
+          setSyncStatus("synced");
+        }
+        return;
+      }
+
+      setRemoteMissing(false);
+      if (remoteVaultRef.current?.rev === metadata.rev) {
+        if (!dirtyRef.current) {
+          setSyncStatus("synced");
+        }
+        if (mode === "manual") {
+          setNotice({ kind: "success", text: "Dropbox 已是最新版本。" });
+        }
+        return;
+      }
+
+      setSyncStatus("remote-update");
+      if (dirtyRef.current) {
+        shouldSyncAfterCheck = true;
+        return;
+      }
+
+      const downloaded = await downloadRemoteVault(context.dbx);
+      if (!downloaded) {
+        setRemoteVault(null);
+        setRemoteMissing(true);
+        return;
+      }
+      const nextSession = await unlockVaultWithKeyContext(downloaded.text, currentSession.keyContext);
+      applyRemoteVault(nextSession, downloaded);
+      setNotice({
+        kind: "success",
+        text: mode === "manual" ? "已加载远端最新数据。" : "已自动加载 Dropbox 最新数据。",
+      });
+    } catch (error) {
+      setSyncStatus("error");
+      setNotice({ kind: "error", text: formatDropboxError(error) });
+    } finally {
+      remoteCheckInFlightRef.current = false;
+      if (shouldSyncAfterCheck) {
+        void syncVault(mode);
+      }
+    }
+  }
+
+  function applySyncedVault(sourceSession: VaultSession, data: VaultData, uploaded: RemoteVault): boolean {
+    setRemoteVault(uploaded);
+    setRemoteMissing(false);
+    setBaseVaultData(data);
+    const latestSession = sessionRef.current;
+    if (!latestSession) {
+      dirtyRef.current = false;
+      setDirty(false);
+      setSyncStatus("synced");
+      clearPendingVaultInfo();
+      return true;
+    }
+    if (latestSession !== sourceSession) {
+      setSyncStatus(isOffline() ? "offline" : "pending");
+      return false;
+    }
+    setSession({ ...sourceSession, data });
+    dirtyRef.current = false;
+    setDirty(false);
+    setSyncStatus("synced");
+    clearPendingVaultInfo();
+    return true;
+  }
+
+  function applyRemoteVault(nextSession: VaultSession, downloaded: RemoteVault) {
+    setRemoteVault(downloaded);
+    setRemoteMissing(false);
+    setBaseVaultData(nextSession.data);
+    setSession(nextSession);
+    dirtyRef.current = false;
+    setDirty(false);
+    setSyncStatus("synced");
+    clearPendingVaultInfo();
+    setSelectedId(nextSession.data.items.find((item) => !item.deletedAt)?.id ?? null);
+  }
+
+  async function restorePendingVaultIfNewer(remoteSession: VaultSession): Promise<VaultSession | null> {
+    const pending = loadPendingVaultInfo();
+    if (!pending) {
+      return null;
+    }
+
+    try {
+      const pendingSession = await unlockVaultWithKeyContext(pending.text, remoteSession.keyContext);
+      const pendingUpdatedAt = Date.parse(pendingSession.data.meta.updatedAt);
+      const remoteUpdatedAt = Date.parse(remoteSession.data.meta.updatedAt);
+      const sameRemoteBase = pending.remoteRev !== null && pending.remoteRev === remoteVaultRef.current?.rev;
+      if (
+        pendingUpdatedAt > remoteUpdatedAt ||
+        (sameRemoteBase && !vaultDataEqual(pendingSession.data, remoteSession.data))
+      ) {
+        return pendingSession;
+      }
+      clearPendingVaultInfo();
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function unlockPendingVaultWithPassword(masterPassword: string): Promise<VaultSession | null> {
+    const pending = loadPendingVaultInfo();
+    if (!pending) {
+      return null;
+    }
+    try {
+      return await unlockVault(pending.text, masterPassword);
+    } catch {
+      return null;
+    }
+  }
+
   async function handleConnectDropbox() {
     const nextAppKey = appKeyDraft.trim();
     if (!nextAppKey) {
@@ -308,7 +644,10 @@ export function App() {
       setRemoteVault(null);
       setRemoteMissing(false);
       setSession(null);
+      setBaseVaultData(null);
+      dirtyRef.current = false;
       setDirty(false);
+      setSyncStatus("synced");
       autoLoadAttempted.current = false;
     }
     setAppKey(effectiveAppKey);
@@ -322,14 +661,20 @@ export function App() {
     setRemoteVault(null);
     setRemoteMissing(false);
     setSession(null);
+    setBaseVaultData(null);
+    dirtyRef.current = false;
     setDirty(false);
+    setSyncStatus("synced");
     autoLoadAttempted.current = false;
     setNotice({ kind: "info", text: "已移除本机 Dropbox token。" });
   }
 
-  function handleLockVault() {
+  async function handleLockVault() {
     if (dirty && !window.confirm("有未同步修改。仍要锁定密码库吗？")) {
       return;
+    }
+    if (dirty && sessionRef.current) {
+      await persistLocalPendingVault(sessionRef.current);
     }
     setSession(null);
     setSelectedId(null);
@@ -337,7 +682,10 @@ export function App() {
     setUnlockPassword("");
     setChangedMasterPassword("");
     setChangedMasterPasswordConfirm("");
+    setBaseVaultData(null);
+    dirtyRef.current = false;
     setDirty(false);
+    setSyncStatus("synced");
     setNotice({ kind: "info", text: "密码库已锁定。" });
   }
 
@@ -349,14 +697,34 @@ export function App() {
     }
     setBusy("解锁密码库");
     try {
-      const nextSession = await unlockVault(remoteVault.text, unlockPassword);
+      const remoteSession = await unlockVault(remoteVault.text, unlockPassword);
+      const pendingSession = await restorePendingVaultIfNewer(remoteSession);
+      const nextSession = pendingSession ?? remoteSession;
+      setBaseVaultData(remoteSession.data);
       setSession(nextSession);
       setUnlockPassword("");
-      setDirty(false);
-      setSelectedId(nextSession.data.items[0]?.id ?? null);
-      setNotice({ kind: "success", text: "密码库已解锁。" });
+      setDirty(Boolean(pendingSession));
+      dirtyRef.current = Boolean(pendingSession);
+      setSyncStatus(pendingSession ? (isOffline() ? "offline" : "pending") : "synced");
+      setSelectedId(nextSession.data.items.find((item) => !item.deletedAt)?.id ?? null);
+      setNotice({
+        kind: "success",
+        text: pendingSession ? "已解锁，并恢复本机未同步修改。" : "密码库已解锁。",
+      });
     } catch (error) {
-      setNotice({ kind: "error", text: error instanceof Error ? error.message : "解锁失败。" });
+      const pendingSession = await unlockPendingVaultWithPassword(unlockPassword);
+      if (pendingSession) {
+        setBaseVaultData(null);
+        setSession(pendingSession);
+        setUnlockPassword("");
+        dirtyRef.current = true;
+        setDirty(true);
+        setSyncStatus(isOffline() ? "offline" : "pending");
+        setSelectedId(pendingSession.data.items.find((item) => !item.deletedAt)?.id ?? null);
+        setNotice({ kind: "success", text: "已从本机加密待同步副本恢复密码库。" });
+      } else {
+        setNotice({ kind: "error", text: error instanceof Error ? error.message : "解锁失败。" });
+      }
     } finally {
       setBusy(null);
     }
@@ -385,8 +753,12 @@ export function App() {
       const uploaded = await uploadRemoteVault(context.dbx, sealed.text, null);
       setRemoteVault(uploaded);
       setRemoteMissing(false);
+      setBaseVaultData(sealed.data);
       setSession({ ...nextSession, data: sealed.data });
+      dirtyRef.current = false;
       setDirty(false);
+      setSyncStatus("synced");
+      clearPendingVaultInfo();
       setNewMasterPassword("");
       setNewMasterPasswordConfirm("");
       setNotice({ kind: "success", text: `已创建并上传 /${VAULT_FILE_NAME}。` });
@@ -398,26 +770,7 @@ export function App() {
   }
 
   async function handleSyncVault() {
-    if (!session) return;
-    setBusy("加密并同步");
-    try {
-      const context = await requireDropboxClient();
-      const sealed = await sealVault(session);
-      const uploaded = await uploadRemoteVault(context.dbx, sealed.text, remoteVault?.rev ?? null);
-      setRemoteVault(uploaded);
-      setSession({ ...session, data: sealed.data });
-      setDirty(false);
-      setNotice({ kind: "success", text: "已同步到 Dropbox。" });
-    } catch (error) {
-      setNotice({
-        kind: "error",
-        text: isDropboxConflict(error)
-          ? "远端 vault.enc 已变化。请先拉取远端或确认后再处理。"
-          : formatDropboxError(error),
-      });
-    } finally {
-      setBusy(null);
-    }
+    await syncVault("manual");
   }
 
   async function handleChangeMasterPassword(event: FormEvent) {
@@ -436,10 +789,10 @@ export function App() {
     try {
       const nextSession = await changeVaultMasterPassword(session, changedMasterPassword);
       setSession(nextSession);
-      setDirty(true);
+      markVaultDirty();
       setChangedMasterPassword("");
       setChangedMasterPasswordConfirm("");
-      setNotice({ kind: "success", text: "主密码已修改。请同步到 Dropbox 使新主密码生效。" });
+      setNotice({ kind: "success", text: "主密码已修改，将自动同步到 Dropbox。" });
     } catch (error) {
       setNotice({ kind: "error", text: error instanceof Error ? error.message : "主密码修改失败。" });
     } finally {
@@ -449,24 +802,7 @@ export function App() {
 
   async function handlePullRemoteIntoSession() {
     if (!session) return;
-    if (dirty) {
-      setNotice({ kind: "error", text: "当前有未同步修改，先同步或锁定后再拉取。" });
-      return;
-    }
-    const downloaded = await refreshRemoteVault();
-    if (!downloaded) return;
-
-    setBusy("解密远端密码库");
-    try {
-      const nextSession = await unlockVaultWithKeyContext(downloaded.text, session.keyContext);
-      setSession(nextSession);
-      setSelectedId(nextSession.data.items[0]?.id ?? null);
-      setNotice({ kind: "success", text: "已加载远端最新数据。" });
-    } catch (error) {
-      setNotice({ kind: "error", text: error instanceof Error ? error.message : "无法加载远端数据。" });
-    } finally {
-      setBusy(null);
-    }
+    await checkRemoteForUpdates("manual");
   }
 
   async function handleExportEncrypted() {
@@ -577,7 +913,7 @@ export function App() {
     setSelectedId(nextItem.id);
     setEditingId(null);
     setDraft(EMPTY_DRAFT);
-    setDirty(true);
+    markVaultDirty();
     setNotice({ kind: "success", text: editingId ? "条目已更新。" : "条目已添加。" });
   }
 
@@ -594,11 +930,20 @@ export function App() {
             ...previous.data.meta,
             updatedAt: now,
           },
-          items: previous.data.items.filter((candidate) => candidate.id !== item.id),
+          items: previous.data.items.map((candidate) =>
+            candidate.id === item.id
+              ? {
+                  ...candidate,
+                  updatedAt: now,
+                  deletedAt: now,
+                }
+              : candidate,
+          ),
         },
       };
     });
-    setDirty(true);
+    setSelectedId(visibleItems.find((candidate) => candidate.id !== item.id)?.id ?? null);
+    markVaultDirty();
     setNotice({ kind: "info", text: "条目已删除。" });
   }
 
@@ -673,11 +1018,14 @@ export function App() {
   }
 
   async function requireDropboxClient() {
-    if (!appKey || !tokens || !hasDropboxToken(tokens)) {
+    const activeAppKey = appKeyRef.current;
+    const activeTokens = tokensRef.current;
+    if (!activeAppKey || !activeTokens || !hasDropboxToken(activeTokens)) {
       throw new Error("请先连接 Dropbox。");
     }
-    const context = await createDropboxClient(appKey, tokens);
+    const context = await createDropboxClient(activeAppKey, activeTokens);
     saveDropboxTokenInfo(context.tokens);
+    tokensRef.current = context.tokens;
     setTokens(context.tokens);
     return context;
   }
@@ -691,7 +1039,7 @@ export function App() {
           </span>
           <div>
             <h1>Easy Pass</h1>
-            <p>{session ? `${items.length} 个条目` : "端到端加密密码库"}</p>
+            <p>{session ? `${visibleItems.length} 个条目` : "端到端加密密码库"}</p>
           </div>
         </div>
 
@@ -702,19 +1050,29 @@ export function App() {
           </span>
           {session && (
             <>
+              <span className={`sync-pill sync-state ${syncStatus}`}>
+                {syncStatus === "syncing" || syncStatus === "saving" ? (
+                  <RefreshCw className="spin" size={16} />
+                ) : syncStatus === "offline" ? (
+                  <CloudOff size={16} />
+                ) : (
+                  <Check size={16} />
+                )}
+                {getSyncStatusLabel(syncStatus, dirty)}
+              </span>
               <button className="icon-button" title="拉取远端" onClick={handlePullRemoteIntoSession} disabled={Boolean(busy)}>
                 <Download size={18} />
               </button>
               <button
                 className="primary-button"
                 onClick={handleSyncVault}
-                disabled={Boolean(busy) || !dirty}
+                disabled={Boolean(busy) || syncStatus === "syncing" || (!dirty && syncStatus === "synced")}
                 title="同步到 Dropbox"
               >
                 <Save size={17} />
-                {dirty ? "同步" : "已同步"}
+                {getSyncButtonLabel(syncStatus, dirty)}
               </button>
-              <button className="icon-button" title="锁定" onClick={handleLockVault}>
+              <button className="icon-button" title="锁定" onClick={() => void handleLockVault()}>
                 <Lock size={18} />
               </button>
             </>
@@ -1472,6 +1830,31 @@ function formatTotpCode(code: string): string {
     return `${code.slice(0, 3)} ${code.slice(3)}`;
   }
   return code;
+}
+
+function getSyncStatusLabel(status: SyncStatus, dirty: boolean): string {
+  if (status === "saving") return "本地保存中";
+  if (status === "syncing") return "同步中";
+  if (status === "remote-update") return "远端有更新";
+  if (status === "offline") return "离线等待";
+  if (status === "error") return "同步失败";
+  if (dirty || status === "pending") return "本地有修改";
+  return "已同步";
+}
+
+function getSyncButtonLabel(status: SyncStatus, dirty: boolean): string {
+  if (status === "syncing") return "同步中";
+  if (status === "offline") return "离线等待";
+  if (dirty || status === "pending" || status === "error" || status === "remote-update") return "同步";
+  return "已同步";
+}
+
+function vaultDataEqual(left: VaultData, right: VaultData): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function isOffline(): boolean {
+  return navigator.onLine === false;
 }
 
 function CustomFieldDetail({

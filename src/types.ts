@@ -33,6 +33,7 @@ export type VaultItem = {
   totp: TotpConfig | null;
   createdAt: string;
   updatedAt: string;
+  deletedAt?: string;
 };
 
 export type VaultData = {

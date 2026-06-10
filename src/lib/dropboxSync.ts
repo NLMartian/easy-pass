@@ -18,6 +18,12 @@ export type RemoteVault = {
   size: number;
 };
 
+export type RemoteVaultMetadata = {
+  rev: string;
+  serverModified: string;
+  size: number;
+};
+
 export type DropboxClientContext = {
   dbx: Dropbox;
   tokens: DropboxTokenInfo;
@@ -155,6 +161,26 @@ export async function downloadRemoteVault(dbx: Dropbox): Promise<RemoteVault | n
       rev: response.result.rev,
       serverModified: response.result.server_modified,
       size: response.result.size,
+    };
+  } catch (error) {
+    if (isDropboxNotFound(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function getRemoteVaultMetadata(dbx: Dropbox): Promise<RemoteVaultMetadata | null> {
+  try {
+    const response = await dbx.filesGetMetadata({ path: VAULT_PATH });
+    const metadata = response.result;
+    if (metadata[".tag"] !== "file") {
+      throw new Error(`Dropbox 路径 /${VAULT_FILE_NAME} 不是文件。`);
+    }
+    return {
+      rev: metadata.rev,
+      serverModified: metadata.server_modified,
+      size: metadata.size,
     };
   } catch (error) {
     if (isDropboxNotFound(error)) {

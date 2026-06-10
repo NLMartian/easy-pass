@@ -148,6 +148,32 @@ a {
   background: var(--accent-soft);
 }
 
+.sync-pill.sync-state {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.sync-pill.sync-state.synced {
+  color: var(--accent-strong);
+  border-color: #bddfd5;
+  background: var(--accent-soft);
+}
+
+.sync-pill.sync-state.pending,
+.sync-pill.sync-state.saving,
+.sync-pill.sync-state.remote-update {
+  color: var(--warning);
+  border-color: #e8cf8c;
+  background: #fff8e6;
+}
+
+.sync-pill.sync-state.offline,
+.sync-pill.sync-state.error {
+  color: var(--danger);
+  border-color: #f1b7b2;
+  background: #fff1f0;
+}
+
 .primary-button,
 .ghost-button,
 .icon-button {

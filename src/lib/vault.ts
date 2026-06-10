@@ -298,14 +298,23 @@ function normalizeVaultItem(item: VaultItem): VaultItem {
     customFields?: unknown;
     passwordHistory?: unknown;
     totp?: unknown;
+    deletedAt?: unknown;
   };
 
-  return {
+  const normalized: VaultItem = {
     ...item,
     customFields: normalizeCustomFields(maybeItem.customFields),
     passwordHistory: normalizePasswordHistory(maybeItem.passwordHistory),
     totp: normalizeTotp(maybeItem.totp),
   };
+
+  if (typeof maybeItem.deletedAt === "string") {
+    normalized.deletedAt = maybeItem.deletedAt;
+  } else {
+    delete normalized.deletedAt;
+  }
+
+  return normalized;
 }
 
 function normalizeCustomFields(value: unknown): VaultCustomField[] {
