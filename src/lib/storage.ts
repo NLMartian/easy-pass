@@ -10,9 +10,22 @@ export type PendingVaultInfo = {
   remoteRev: string | null;
 };
 
+export type BiometricUnlockInfo = {
+  version: 1;
+  credentialId: string;
+  salt: string;
+  nonce: string;
+  wrappedKey: string;
+  kdfSalt: string;
+  createdAt: string;
+  savedAt: string;
+  origin: string;
+};
+
 const APP_KEY_STORAGE_KEY = "easy-pass:dropbox-app-key";
 const TOKEN_STORAGE_KEY = "easy-pass:dropbox-token-info";
 const PENDING_VAULT_STORAGE_KEY = "easy-pass:pending-vault";
+const BIOMETRIC_UNLOCK_STORAGE_KEY = "easy-pass:biometric-unlock";
 const DEFAULT_DROPBOX_APP_KEY = import.meta.env.VITE_DROPBOX_APP_KEY?.trim() || "56efgyouoypazep";
 
 export function loadDropboxAppKey(): string {
@@ -86,4 +99,41 @@ export function savePendingVaultInfo(pendingVault: PendingVaultInfo): void {
 
 export function clearPendingVaultInfo(): void {
   localStorage.removeItem(PENDING_VAULT_STORAGE_KEY);
+}
+
+export function loadBiometricUnlockInfo(): BiometricUnlockInfo | null {
+  const raw = localStorage.getItem(BIOMETRIC_UNLOCK_STORAGE_KEY);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as BiometricUnlockInfo;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.credentialId !== "string" ||
+      typeof parsed.salt !== "string" ||
+      typeof parsed.nonce !== "string" ||
+      typeof parsed.wrappedKey !== "string" ||
+      typeof parsed.kdfSalt !== "string" ||
+      typeof parsed.createdAt !== "string" ||
+      typeof parsed.savedAt !== "string" ||
+      typeof parsed.origin !== "string"
+    ) {
+      localStorage.removeItem(BIOMETRIC_UNLOCK_STORAGE_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    localStorage.removeItem(BIOMETRIC_UNLOCK_STORAGE_KEY);
+    return null;
+  }
+}
+
+export function saveBiometricUnlockInfo(info: BiometricUnlockInfo): void {
+  localStorage.setItem(BIOMETRIC_UNLOCK_STORAGE_KEY, JSON.stringify(info));
+}
+
+export function clearBiometricUnlockInfo(): void {
+  localStorage.removeItem(BIOMETRIC_UNLOCK_STORAGE_KEY);
 }

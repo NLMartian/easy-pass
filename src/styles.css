@@ -251,6 +251,14 @@ a {
   width: 100%;
 }
 
+.ghost-button.wide {
+  width: 100%;
+}
+
+.biometric-unlock-button {
+  margin-top: 10px;
+}
+
 .notice {
   width: min(980px, calc(100% - 32px));
   min-height: 42px;
@@ -846,6 +854,13 @@ a {
 
 .settings-actions {
   margin-top: 18px;
+}
+
+.settings-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .settings-section {

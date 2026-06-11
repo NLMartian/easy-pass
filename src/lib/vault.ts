@@ -86,6 +86,12 @@ export async function unlockVault(encryptedVault: string, masterPassword: string
   return decryptEnvelope(envelope, key);
 }
 
+export async function unlockVaultWithRawKey(encryptedVault: string, rawKey: Uint8Array): Promise<VaultSession> {
+  const envelope = parseEnvelope(encryptedVault);
+  const key = await importAesKey(rawKey);
+  return decryptEnvelope(envelope, key);
+}
+
 export async function unlockVaultWithKeyContext(
   encryptedVault: string,
   keyContext: VaultKeyContext,
@@ -101,6 +107,11 @@ export async function unlockVaultWithKeyContext(
     throw new Error("远端 vault.enc 使用了不同的密钥参数，请锁定后用主密码重新解锁。");
   }
   return decryptEnvelope(envelope, keyContext.key);
+}
+
+export async function exportVaultRawKey(session: VaultSession): Promise<Uint8Array> {
+  const rawKey = await crypto.subtle.exportKey("raw", session.keyContext.key);
+  return new Uint8Array(rawKey);
 }
 
 export async function sealVault(session: VaultSession): Promise<SealedVault> {
@@ -181,13 +192,17 @@ async function deriveAesKey(masterPassword: string, kdf: KdfParams): Promise<Cry
   });
 
   try {
-    return await crypto.subtle.importKey("raw", toArrayBuffer(rawKey), { name: "AES-GCM" }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    return await importAesKey(rawKey);
   } finally {
     rawKey.fill(0);
   }
+}
+
+async function importAesKey(rawKey: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", toArrayBuffer(rawKey), { name: "AES-GCM" }, true, [
+    "encrypt",
+    "decrypt",
+  ]);
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {

@@ -6,6 +6,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  Fingerprint,
   History,
   KeyRound,
   Lock,
@@ -37,6 +38,11 @@ import {
 } from "./lib/dropboxSync";
 import { randomId } from "./lib/encoding";
 import {
+  canUseBiometricUnlock,
+  createBiometricUnlockInfo,
+  unwrapBiometricVaultKey,
+} from "./lib/biometricUnlock";
+import {
   DEFAULT_PASSWORD_OPTIONS,
   generatePassword,
   MAX_GENERATED_PASSWORD_LENGTH,
@@ -44,12 +50,16 @@ import {
   PasswordGeneratorOptions,
 } from "./lib/passwords";
 import {
+  BiometricUnlockInfo,
   DropboxTokenInfo,
+  clearBiometricUnlockInfo,
   clearPendingVaultInfo,
   hasDropboxToken,
+  loadBiometricUnlockInfo,
   loadDropboxAppKey,
   loadPendingVaultInfo,
   loadDropboxTokenInfo,
+  saveBiometricUnlockInfo,
   saveDropboxAppKey,
   savePendingVaultInfo,
   saveDropboxTokenInfo,
@@ -57,9 +67,11 @@ import {
 import {
   changeVaultMasterPassword,
   createVaultSession,
+  exportVaultRawKey,
   MIN_MASTER_PASSWORD_LENGTH,
   sealVault,
   unlockVault,
+  unlockVaultWithRawKey,
   unlockVaultWithKeyContext,
   VAULT_FILE_NAME,
 } from "./lib/vault";
@@ -111,6 +123,7 @@ const PRIVACY_HREF = `${import.meta.env.BASE_URL}privacy.html`;
 const LOCAL_SAVE_DEBOUNCE_MS = 300;
 const AUTO_SYNC_DEBOUNCE_MS = 3000;
 const REMOTE_CHECK_INTERVAL_MS = 60_000;
+const AUTO_LOCK_MS = 60_000;
 
 export function App() {
   const [appKey, setAppKey] = useState(loadDropboxAppKey);
@@ -119,6 +132,7 @@ export function App() {
   const [remoteVault, setRemoteVault] = useState<RemoteVault | null>(null);
   const [remoteMissing, setRemoteMissing] = useState(false);
   const [session, setSession] = useState<VaultSession | null>(null);
+  const [biometricUnlockInfo, setBiometricUnlockInfo] = useState<BiometricUnlockInfo | null>(loadBiometricUnlockInfo);
   const [baseVaultData, setBaseVaultData] = useState<VaultData | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -152,8 +166,10 @@ export function App() {
   const dirtyRef = useRef(dirty);
   const syncInFlightRef = useRef(false);
   const remoteCheckInFlightRef = useRef(false);
+  const autoLockInFlightRef = useRef(false);
 
   const connected = hasDropboxToken(tokens);
+  const biometricAvailable = canUseBiometricUnlock();
   const items = session?.data.items ?? [];
   const visibleItems = useMemo(() => items.filter((item) => !item.deletedAt), [items]);
   const selectedItem = useMemo(
@@ -375,6 +391,51 @@ export function App() {
       window.clearInterval(intervalId);
     };
   }, [connected, session?.keyContext]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    let lockTimerId: number | null = null;
+    const resetAutoLockTimer = () => {
+      if (lockTimerId !== null) {
+        window.clearTimeout(lockTimerId);
+      }
+      lockTimerId = window.setTimeout(() => {
+        void lockVault({
+          confirmDirty: false,
+          noticeText: "超过 60 秒无操作，密码库已自动锁定。",
+        });
+      }, AUTO_LOCK_MS);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        void lockVault({
+          confirmDirty: false,
+          noticeText: "已切出页面，密码库已自动锁定。",
+        });
+      } else {
+        resetAutoLockTimer();
+      }
+    };
+
+    resetAutoLockTimer();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pointerdown", resetAutoLockTimer, { passive: true });
+    window.addEventListener("keydown", resetAutoLockTimer);
+    window.addEventListener("touchstart", resetAutoLockTimer, { passive: true });
+    window.addEventListener("scroll", resetAutoLockTimer, { passive: true });
+
+    return () => {
+      if (lockTimerId !== null) {
+        window.clearTimeout(lockTimerId);
+      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pointerdown", resetAutoLockTimer);
+      window.removeEventListener("keydown", resetAutoLockTimer);
+      window.removeEventListener("touchstart", resetAutoLockTimer);
+      window.removeEventListener("scroll", resetAutoLockTimer);
+    };
+  }, [session]);
 
   function markVaultDirty() {
     dirtyRef.current = true;
@@ -617,6 +678,21 @@ export function App() {
     }
   }
 
+  function applyUnlockedVault(remoteSession: VaultSession, pendingSession: VaultSession | null, successText: string) {
+    const nextSession = pendingSession ?? remoteSession;
+    setBaseVaultData(remoteSession.data);
+    setSession(nextSession);
+    setUnlockPassword("");
+    setDirty(Boolean(pendingSession));
+    dirtyRef.current = Boolean(pendingSession);
+    setSyncStatus(pendingSession ? (isOffline() ? "offline" : "pending") : "synced");
+    setSelectedId(nextSession.data.items.find((item) => !item.deletedAt)?.id ?? null);
+    setNotice({
+      kind: "success",
+      text: pendingSession ? "已解锁，并恢复本机未同步修改。" : successText,
+    });
+  }
+
   async function handleConnectDropbox() {
     const nextAppKey = appKeyDraft.trim();
     if (!nextAppKey) {
@@ -669,24 +745,46 @@ export function App() {
     setNotice({ kind: "info", text: "已移除本机 Dropbox token。" });
   }
 
-  async function handleLockVault() {
-    if (dirty && !window.confirm("有未同步修改。仍要锁定密码库吗？")) {
+  async function lockVault({
+    confirmDirty,
+    noticeText,
+  }: {
+    confirmDirty: boolean;
+    noticeText: string;
+  }) {
+    if (autoLockInFlightRef.current) {
       return;
     }
-    if (dirty && sessionRef.current) {
-      await persistLocalPendingVault(sessionRef.current);
+
+    autoLockInFlightRef.current = true;
+    try {
+      if (confirmDirty && dirtyRef.current && !window.confirm("有未同步修改。仍要锁定密码库吗？")) {
+        return;
+      }
+      if (dirtyRef.current && sessionRef.current) {
+        await persistLocalPendingVault(sessionRef.current);
+      }
+      setSession(null);
+      setSelectedId(null);
+      setEditingId(null);
+      setUnlockPassword("");
+      setChangedMasterPassword("");
+      setChangedMasterPasswordConfirm("");
+      setBaseVaultData(null);
+      dirtyRef.current = false;
+      setDirty(false);
+      setSyncStatus("synced");
+      setNotice({ kind: "info", text: noticeText });
+    } finally {
+      autoLockInFlightRef.current = false;
     }
-    setSession(null);
-    setSelectedId(null);
-    setEditingId(null);
-    setUnlockPassword("");
-    setChangedMasterPassword("");
-    setChangedMasterPasswordConfirm("");
-    setBaseVaultData(null);
-    dirtyRef.current = false;
-    setDirty(false);
-    setSyncStatus("synced");
-    setNotice({ kind: "info", text: "密码库已锁定。" });
+  }
+
+  async function handleLockVault() {
+    await lockVault({
+      confirmDirty: true,
+      noticeText: "密码库已锁定。",
+    });
   }
 
   async function handleUnlock(event: FormEvent) {
@@ -699,18 +797,7 @@ export function App() {
     try {
       const remoteSession = await unlockVault(remoteVault.text, unlockPassword);
       const pendingSession = await restorePendingVaultIfNewer(remoteSession);
-      const nextSession = pendingSession ?? remoteSession;
-      setBaseVaultData(remoteSession.data);
-      setSession(nextSession);
-      setUnlockPassword("");
-      setDirty(Boolean(pendingSession));
-      dirtyRef.current = Boolean(pendingSession);
-      setSyncStatus(pendingSession ? (isOffline() ? "offline" : "pending") : "synced");
-      setSelectedId(nextSession.data.items.find((item) => !item.deletedAt)?.id ?? null);
-      setNotice({
-        kind: "success",
-        text: pendingSession ? "已解锁，并恢复本机未同步修改。" : "密码库已解锁。",
-      });
+      applyUnlockedVault(remoteSession, pendingSession, "密码库已解锁。");
     } catch (error) {
       const pendingSession = await unlockPendingVaultWithPassword(unlockPassword);
       if (pendingSession) {
@@ -728,6 +815,60 @@ export function App() {
     } finally {
       setBusy(null);
     }
+  }
+
+  async function handleBiometricUnlock() {
+    if (!remoteVault) {
+      setNotice({ kind: "error", text: "请先从 Dropbox 读取 vault.enc。" });
+      return;
+    }
+    if (!biometricUnlockInfo) {
+      setNotice({ kind: "error", text: "这台设备还没有启用指纹/面容解锁。" });
+      return;
+    }
+
+    setBusy("验证指纹/面容");
+    let rawKey: Uint8Array | null = null;
+    try {
+      rawKey = await unwrapBiometricVaultKey(biometricUnlockInfo);
+      const remoteSession = await unlockVaultWithRawKey(remoteVault.text, rawKey);
+      const pendingSession = await restorePendingVaultIfNewer(remoteSession);
+      applyUnlockedVault(remoteSession, pendingSession, "已使用指纹/面容解锁。");
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : "指纹/面容解锁失败。" });
+    } finally {
+      rawKey?.fill(0);
+      setBusy(null);
+    }
+  }
+
+  async function handleEnableBiometricUnlock() {
+    if (!session) return;
+    if (!biometricAvailable) {
+      setNotice({ kind: "error", text: "当前浏览器或访问地址不支持 WebAuthn。请使用 HTTPS 或 localhost。" });
+      return;
+    }
+
+    setBusy("启用指纹/面容");
+    let rawKey: Uint8Array | null = null;
+    try {
+      rawKey = await exportVaultRawKey(session);
+      const info = await createBiometricUnlockInfo(rawKey, session.keyContext);
+      saveBiometricUnlockInfo(info);
+      setBiometricUnlockInfo(info);
+      setNotice({ kind: "success", text: "已为这台设备启用指纹/面容解锁。" });
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : "启用指纹/面容解锁失败。" });
+    } finally {
+      rawKey?.fill(0);
+      setBusy(null);
+    }
+  }
+
+  function handleDisableBiometricUnlock() {
+    clearBiometricUnlockInfo();
+    setBiometricUnlockInfo(null);
+    setNotice({ kind: "info", text: "已停用这台设备的指纹/面容解锁。" });
   }
 
   async function handleCreateVault(event: FormEvent) {
@@ -790,9 +931,11 @@ export function App() {
       const nextSession = await changeVaultMasterPassword(session, changedMasterPassword);
       setSession(nextSession);
       markVaultDirty();
+      clearBiometricUnlockInfo();
+      setBiometricUnlockInfo(null);
       setChangedMasterPassword("");
       setChangedMasterPasswordConfirm("");
-      setNotice({ kind: "success", text: "主密码已修改，将自动同步到 Dropbox。" });
+      setNotice({ kind: "success", text: "主密码已修改，将自动同步到 Dropbox。请重新启用指纹/面容解锁。" });
     } catch (error) {
       setNotice({ kind: "error", text: error instanceof Error ? error.message : "主密码修改失败。" });
     } finally {
@@ -1230,6 +1373,17 @@ export function App() {
             解锁
           </button>
         </form>
+        {biometricUnlockInfo && (
+          <button
+            className="ghost-button wide biometric-unlock-button"
+            type="button"
+            onClick={() => void handleBiometricUnlock()}
+            disabled={Boolean(busy) || !biometricAvailable}
+          >
+            <Fingerprint size={17} />
+            指纹/面容解锁
+          </button>
+        )}
       </section>
     );
   }
@@ -1699,6 +1853,34 @@ export function App() {
                 修改主密码
               </button>
             </form>
+          )}
+          {session && (
+            <div className="settings-section">
+              <div className="section-header">
+                <span>本机指纹/面容解锁</span>
+              </div>
+              <p className="muted">
+                使用 WebAuthn PRF 加密保存本机解锁密钥，仅对当前浏览器和当前站点地址有效。主密码修改后需要重新启用。
+              </p>
+              <div className="settings-inline-actions">
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => void handleEnableBiometricUnlock()}
+                  disabled={Boolean(busy) || !biometricAvailable}
+                >
+                  <Fingerprint size={17} />
+                  {biometricUnlockInfo ? "重新启用" : "启用"}
+                </button>
+                {biometricUnlockInfo && (
+                  <button className="ghost-button danger-text" type="button" onClick={handleDisableBiometricUnlock}>
+                    <X size={16} />
+                    停用
+                  </button>
+                )}
+              </div>
+              {!biometricAvailable && <p className="muted">当前浏览器或访问地址不支持 WebAuthn。请使用 HTTPS 或 localhost。</p>}
+            </div>
           )}
           <div className="settings-actions">
             <button className="ghost-button" onClick={handleExportEncrypted}>
